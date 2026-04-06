@@ -355,65 +355,42 @@ class GraphWidget(FigureCanvas):
         ax = self.ax
         ax.clear()
         ax.set_facecolor("#16213e")
-        ax.set_title("Real-time Response Times", color="#e0e0e0", fontsize=10, pad=8)
-        ax.set_xlabel("Request #", color="#aaaaaa", fontsize=8)
-        ax.set_ylabel("ms", color="#aaaaaa", fontsize=8)
         ax.tick_params(colors="#888888", labelsize=7)
         for spine in ax.spines.values():
             spine.set_color("#333355")
         ax.grid(True, alpha=0.2, color="#444466", linestyle="--")
 
+        # Cap at 20 proxies to keep rendering fast — pick busiest ones
+        candidates = [ps for ps in self._proxy_list if ps.history_total]
+        candidates.sort(key=lambda p: p.total_requests, reverse=True)
+        to_plot = candidates[:20]
+
+        total = len(self._proxy_list)
+        title = f"Real-time Response Times  (top {len(to_plot)} of {total})" if total > 20 else "Real-time Response Times"
+        ax.set_title(title, color="#e0e0e0", fontsize=9, pad=6)
+        ax.set_xlabel("Request #", color="#aaaaaa", fontsize=8)
+        ax.set_ylabel("ms", color="#aaaaaa", fontsize=8)
+
         any_data = False
-
-        for ps in self._proxy_list:
+        for ps in to_plot:
             history = list(ps.history_total)
-            if not history:
-                continue
-
-            x_all  = list(range(len(history)))
             x_good = [i for i, v in enumerate(history) if v is not None]
             y_good = [v for v in history if v is not None]
-
             if not y_good:
                 continue
-
             any_data = True
-
-            # main line
-            ax.plot(
-                x_good, y_good,
-                color=ps.color, linewidth=1.6, alpha=0.9,
-                label=ps.display_name,
-                marker="o", markersize=2.5, markerfacecolor=ps.color,
-            )
-
-            # failure markers (red X on x-axis)
-            x_fail = [i for i, v in enumerate(history) if v is None]
-            if x_fail:
-                y_fail = [0] * len(x_fail)
-                ax.scatter(
-                    x_fail, y_fail,
-                    marker="x", color="#ff4444", s=40, zorder=5,
-                    linewidths=1.5,
-                )
-
-            # spike markers (red triangle up)
+            ax.plot(x_good, y_good, color=ps.color, linewidth=1.4,
+                    alpha=0.85, label=ps.display_name)
             if len(y_good) > 3:
                 avg = sum(y_good) / len(y_good)
                 sx = [xi for xi, yi in zip(x_good, y_good) if yi > 2 * avg]
                 sy = [yi for xi, yi in zip(x_good, y_good) if yi > 2 * avg]
                 if sx:
-                    ax.scatter(
-                        sx, sy,
-                        marker="^", color="#FF6B6B", s=55, zorder=6, alpha=0.85,
-                    )
+                    ax.scatter(sx, sy, marker="^", color="#FF6B6B", s=40, zorder=5)
 
-        if any_data:
-            legend = ax.legend(
-                fontsize=7.5, loc="upper left",
-                facecolor="#1a1a2e", edgecolor="#444466",
-                labelcolor="#dddddd",
-            )
+        if any_data and len(to_plot) <= 10:
+            ax.legend(fontsize=7, loc="upper left",
+                      facecolor="#1a1a2e", edgecolor="#444466", labelcolor="#dddddd")
 
         self.fig.canvas.draw_idle()
 
@@ -484,9 +461,11 @@ class StatsTable(QTableWidget):
             self._fill_row(row, ps)
 
     def update_all(self, proxy_list: List[ProxyStats]):
+        self.setUpdatesEnabled(False)
         for row, ps in enumerate(proxy_list):
             if row < self.rowCount():
                 self._fill_row(row, ps)
+        self.setUpdatesEnabled(True)
 
     def _fill_row(self, row: int, ps: ProxyStats):
         # column 0 — proxy name (coloured)
@@ -553,9 +532,14 @@ class MainWindow(QMainWindow):
 
         self._build_ui()
         self._apply_dark_theme()
+        # Table refreshes every 2s, graph every 4s (expensive with many proxies)
+        self._table_timer = QTimer(self)
+        self._table_timer.timeout.connect(self._refresh_table)
+        self._table_timer.start(2000)
+
         self._graph_timer = QTimer(self)
-        self._graph_timer.timeout.connect(self._refresh_ui)
-        self._graph_timer.start(1000)  # refresh table + graph every 1s
+        self._graph_timer.timeout.connect(self._refresh_graph)
+        self._graph_timer.start(4000)
 
     # ── UI construction ───────────────────────────────────────────────────
 
@@ -929,11 +913,13 @@ class MainWindow(QMainWindow):
 
     # ── UI refresh (timer-driven, not per-result) ─────────────────────────
 
-    def _refresh_ui(self):
-        if not self._proxy_list:
-            return
-        self.table.update_all(self._proxy_list)
-        self.graph.refresh()
+    def _refresh_table(self):
+        if self._proxy_list:
+            self.table.update_all(self._proxy_list)
+
+    def _refresh_graph(self):
+        if self._proxy_list:
+            self.graph.refresh()
 
     # ── Sort ──────────────────────────────────────────────────────────────
 
