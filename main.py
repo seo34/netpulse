@@ -17,6 +17,7 @@ import time
 import csv
 import math
 import uuid
+import queue
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 from collections import deque
@@ -192,10 +193,10 @@ def parse_proxy(raw: str) -> Tuple[str, object]:
 
 class TestWorker(QThread):
     """
-    Background QThread that owns an asyncio event loop.
-    Emits result_ready(proxy_id, result_dict) after every individual request.
+    Background QThread with its own asyncio event loop.
+    Results are pushed into a thread-safe queue — never via Qt signals —
+    so the UI event loop is never flooded regardless of proxy count.
     """
-    result_ready = pyqtSignal(str, dict)
 
     def __init__(
         self,
@@ -213,6 +214,8 @@ class TestWorker(QThread):
         self.concurrency = concurrency
         self._running    = True
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+        # Main thread drains this queue on a timer — no signals needed
+        self.result_queue: queue.Queue = queue.Queue()
 
     def stop(self):
         self._running = False
@@ -233,8 +236,7 @@ class TestWorker(QThread):
                 pass
 
     async def _main_loop(self):
-        # Cap total simultaneous connections to avoid overwhelming the system
-        sem = asyncio.Semaphore(50)
+        sem = asyncio.Semaphore(40)
 
         async def bounded(ps):
             async with sem:
@@ -293,34 +295,33 @@ class TestWorker(QThread):
                     await resp.read()
                     total = time.time() - req_start
                     ttfb  = (first_byte[0] - req_start) if first_byte[0] else total
-                    self.result_ready.emit(ps.proxy_id, {
+                    self.result_queue.put_nowait((ps.proxy_id, {
                         "success": True,
                         "total":   total,
                         "ttfb":    ttfb,
                         "status":  resp.status,
-                    })
+                    }))
 
         except asyncio.TimeoutError:
-            self.result_ready.emit(ps.proxy_id, {
+            self.result_queue.put_nowait((ps.proxy_id, {
                 "success": False,
                 "error":   "Timeout",
-                "elapsed": time.time() - req_start,
-            })
+            }))
         except aiohttp.ClientProxyConnectionError as exc:
-            self.result_ready.emit(ps.proxy_id, {
+            self.result_queue.put_nowait((ps.proxy_id, {
                 "success": False,
-                "error":   f"ProxyConn: {str(exc)[:50]}",
-            })
+                "error":   f"ProxyConn: {str(exc)[:40]}",
+            }))
         except aiohttp.ClientConnectorError as exc:
-            self.result_ready.emit(ps.proxy_id, {
+            self.result_queue.put_nowait((ps.proxy_id, {
                 "success": False,
-                "error":   f"ConnErr: {str(exc)[:50]}",
-            })
+                "error":   f"ConnErr: {str(exc)[:40]}",
+            }))
         except Exception as exc:
-            self.result_ready.emit(ps.proxy_id, {
+            self.result_queue.put_nowait((ps.proxy_id, {
                 "success": False,
-                "error":   str(exc)[:60],
-            })
+                "error":   str(exc)[:50],
+            }))
 
 
 # ── Graph Widget ──────────────────────────────────────────────────────────────
@@ -876,7 +877,6 @@ class MainWindow(QMainWindow):
             timeout      = self.timeout_spin.value(),
             concurrency  = self.concurrency_spin.value(),
         )
-        self._worker.result_ready.connect(self._on_result)
         self._worker.finished.connect(self._on_worker_done)
         self._worker.start()
 
@@ -899,21 +899,27 @@ class MainWindow(QMainWindow):
         self.btn_start.setEnabled(True)
         self.btn_stop.setEnabled(False)
 
-    # ── Result handling ───────────────────────────────────────────────────
+    # ── Drain worker queue + refresh UI (timer-driven) ───────────────────
 
-    def _on_result(self, proxy_id: str, result: dict):
-        # Only update the data model here — UI refresh happens on timer
-        ps = next((p for p in self._proxy_list if p.proxy_id == proxy_id), None)
-        if ps is None:
+    def _drain_queue(self):
+        """Pull all pending results from worker queue into data model."""
+        if not self._worker:
             return
-        if result.get("success"):
-            ps.record(result["total"])
-        else:
-            ps.record(None, error=result.get("error", "Error"))
-
-    # ── UI refresh (timer-driven, not per-result) ─────────────────────────
+        proxy_map = {ps.proxy_id: ps for ps in self._proxy_list}
+        try:
+            while True:
+                proxy_id, result = self._worker.result_queue.get_nowait()
+                ps = proxy_map.get(proxy_id)
+                if ps:
+                    if result.get("success"):
+                        ps.record(result["total"])
+                    else:
+                        ps.record(None, error=result.get("error", "Error"))
+        except queue.Empty:
+            pass
 
     def _refresh_table(self):
+        self._drain_queue()
         if self._proxy_list:
             self.table.update_all(self._proxy_list)
 
