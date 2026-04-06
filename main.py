@@ -233,10 +233,17 @@ class TestWorker(QThread):
                 pass
 
     async def _main_loop(self):
+        # Cap total simultaneous connections to avoid overwhelming the system
+        sem = asyncio.Semaphore(50)
+
+        async def bounded(ps):
+            async with sem:
+                await self._test_one(ps)
+
         while self._running:
             cycle_start = time.time()
             tasks = [
-                self._test_one(ps)
+                bounded(ps)
                 for ps in self.proxy_list
                 for _ in range(self.concurrency)
             ]
@@ -547,8 +554,8 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._apply_dark_theme()
         self._graph_timer = QTimer(self)
-        self._graph_timer.timeout.connect(self._refresh_graph)
-        self._graph_timer.start(800)
+        self._graph_timer.timeout.connect(self._refresh_ui)
+        self._graph_timer.start(1000)  # refresh table + graph every 1s
 
     # ── UI construction ───────────────────────────────────────────────────
 
@@ -911,22 +918,22 @@ class MainWindow(QMainWindow):
     # ── Result handling ───────────────────────────────────────────────────
 
     def _on_result(self, proxy_id: str, result: dict):
+        # Only update the data model here — UI refresh happens on timer
         ps = next((p for p in self._proxy_list if p.proxy_id == proxy_id), None)
         if ps is None:
             return
-
         if result.get("success"):
             ps.record(result["total"])
         else:
             ps.record(None, error=result.get("error", "Error"))
 
+    # ── UI refresh (timer-driven, not per-result) ─────────────────────────
+
+    def _refresh_ui(self):
+        if not self._proxy_list:
+            return
         self.table.update_all(self._proxy_list)
-
-    # ── Graph refresh ─────────────────────────────────────────────────────
-
-    def _refresh_graph(self):
-        if self._proxy_list:
-            self.graph.refresh()
+        self.graph.refresh()
 
     # ── Sort ──────────────────────────────────────────────────────────────
 
