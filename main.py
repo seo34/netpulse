@@ -5,12 +5,15 @@ WinMTR-style continuous HTTP/HTTPS proxy benchmarking tool.
 
 Usage:
     python main.py
+    python main.py --label "NYC Server"
+    python main.py --label "Ashburn Server"
 
 Requirements:
     pip install PyQt5 aiohttp matplotlib numpy
 """
 
 import sys
+import argparse
 import asyncio
 import aiohttp
 import time
@@ -522,9 +525,10 @@ class StatsTable(QTableWidget):
 # ── Main Window ───────────────────────────────────────────────────────────────
 
 class MainWindow(QMainWindow):
-    def __init__(self):
+    def __init__(self, label: str = ""):
         super().__init__()
-        self.setWindowTitle("NetPulse — HTTP Proxy Tester")
+        title = f"NetPulse — {label}" if label else "NetPulse — HTTP Proxy Tester"
+        self.setWindowTitle(title)
         self.resize(1200, 780)
 
         self._proxy_list: List[ProxyStats]      = []
@@ -982,7 +986,10 @@ class MainWindow(QMainWindow):
 # ── Entry Point ───────────────────────────────────────────────────────────────
 
 def main():
-    # Allow high-DPI scaling
+    parser = argparse.ArgumentParser(description="NetPulse — HTTP Proxy Tester")
+    parser.add_argument("--label", default="", help='Server label, e.g. "NYC Server"')
+    args, _ = parser.parse_known_args()
+
     QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
     QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
 
@@ -990,7 +997,7 @@ def main():
     app.setApplicationName("NetPulse")
     app.setStyle("Fusion")
 
-    window = MainWindow()
+    window = MainWindow(label=args.label)
     window.show()
     sys.exit(app.exec_())
 
